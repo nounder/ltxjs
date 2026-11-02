@@ -8,7 +8,7 @@ import * as ObjectStore from "../../src/ObjectStore.ts"
 import * as Replica from "../../src/Replica.ts"
 import * as S3 from "../../src/S3.ts"
 
-const enabled=process.env.LTX_JS_INTEGRATION==="1", directory=enabled?await mkdtemp(join(tmpdir(),"ltx-js-versity-")):""
+const enabled=Bun.env.TEST_INTEGRATIONS==="1", directory=enabled?await mkdtemp(join(tmpdir(),"ltx-js-versity-")):""
 const s3:S3.Options={endpoint:process.env.LTX_JS_S3_ENDPOINT??"http://127.0.0.1:7070",bucket:process.env.LTX_JS_S3_BUCKET??"ltx-js-test",region:"us-east-1",accessKeyId:process.env.AWS_ACCESS_KEY_ID??"ltx-js",secretAccessKey:process.env.AWS_SECRET_ACCESS_KEY??"ltx-js-development-secret",pathStyle:true}
 const awsEnvironment={...process.env,AWS_ACCESS_KEY_ID:s3.accessKeyId,AWS_SECRET_ACCESS_KEY:s3.secretAccessKey}
 const command=async(args:ReadonlyArray<string>)=>{const child=Bun.spawn([...args],{stdout:"pipe",stderr:"pipe",env:awsEnvironment}),[code,stderr]=await Promise.all([child.exited,new Response(child.stderr).text()]);if(code!==0)throw new Error(`${args.join(" ")} failed: ${stderr}`)}

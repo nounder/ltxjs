@@ -7,13 +7,17 @@
   },
   "scripts": {
     "test": "bun test",
-    "test:integration": "LTX_JS_INTEGRATION=1 bun test test/integration",
-    "check": "bun run typecheck && bun test && bun build src/index.ts --outdir /tmp/ltx-js-build --target bun",
+    "test:integration": "TEST_INTEGRATIONS=1 bun test test/integration",
+    "check": "bun run typecheck && bun test && bun build src/index.ts src/Cli.ts --outdir /tmp/ltx-js-build --target bun",
     "bench": "bun run benchmarks/Replication.bench.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "cli": "bun run src/Cli.ts"
   },
   "devDependencies": {
     "@types/bun": "^1.4.4",
     "typescript": "^7.0.2"
+  },
+  "bin": {
+    "ltxjs": "./src/Cli.ts"
   }
 }

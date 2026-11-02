@@ -48,13 +48,13 @@ const parseState = (value:Uint8Array): State => {
 
 export const make = (options:Options): Replica => {
   const base=normalize(options.keyPrefix), now=options.now ?? (()=>new Date())
-  let state=initialState(), loaded=false, timer:ReturnType<typeof setTimeout>|undefined, active:Promise<Position>|undefined, guard:Database|undefined, stopped=true
+  let state=initialState(), loaded=false, needsReconcile=false, timer:ReturnType<typeof setTimeout>|undefined, active:Promise<Position>|undefined, guard:Database|undefined, stopped=true
   const save = async (next:State) => { await options.store.put(stateKey(base),serializeState(next)); state=next }
-  const load = async () => { if(loaded)return; const value=await options.store.get(stateKey(base)); if(value) state=parseState(value); loaded=true }
+  const load = async () => { if(loaded)return; const value=await options.store.get(stateKey(base)); if(value) {state=parseState(value);needsReconcile=true} loaded=true }
   const ensureGuard = () => { if(guard)return;guard=new Database(options.databasePath,{readonly:true});guard.run("BEGIN");guard.query("SELECT rootpage FROM sqlite_schema LIMIT 1").get() }
   const closeGuard = () => { if(!guard)return;try{guard.run("COMMIT")}finally{guard.close();guard=undefined} }
 
-  const snapshot = async (): Promise<void> => {
+  const capture = () => {
     // Hold the writer lock while capturing both the SQLite snapshot and its WAL
     // cursor. Keep a reader open before releasing it so unsynced frames survive.
     const sqlite=new Database(options.databasePath)
@@ -71,10 +71,31 @@ export const make = (options:Options): Replica => {
       }
       sqlite.run("COMMIT")
     } finally { sqlite.close() }
+    return {db,wal}
+  }
+
+  const snapshot = async (): Promise<void> => {
+    const {db,wal}=capture()
     const snapshotPages=db.pages.filter(page=>page.pageNumber!==Ltx.lockPageNumber(db.pageSize)),pages=snapshotPages.map(page=>[page.pageNumber,page.data] as const), checksum=Checksum.database(pages)
     const header:Ltx.Header={flags:Ltx.NoChecksum,pageSize:db.pageSize,commit:db.pages.length,minTxId:1n,maxTxId:1n,timestamp:BigInt(now().getTime()),preApplyChecksum:0n,walOffset:0n,walSize:0n,walSalt1:0,walSalt2:0,nodeId:0n}
     await options.store.put(ltxKey(base,1n,1n),Ltx.encode(header,snapshotPages,0n))
     await save({txId:1n,checksum,walOffset:wal?.nextOffset??Wal.HeaderSize,walSalt1:wal?.header.salt1??0,walSalt2:wal?.header.salt2??0,pageSize:db.pageSize,commit:db.pages.length,pageChecksums:new Map(pages.map(([page,data])=>[page,Checksum.page(page,data)]))})
+  }
+
+  // Between processes SQLite may checkpoint and delete the WAL. Reconcile a
+  // consistent current image against the durable checksum before resuming it.
+  const reconcile = async (): Promise<void> => {
+    const {db,wal}=capture(), pages=db.pages.filter(page=>page.pageNumber!==Ltx.lockPageNumber(db.pageSize))
+    const sums=new Map(pages.map(page=>[page.pageNumber,Checksum.page(page.pageNumber,page.data)]))
+    const checksum=Checksum.Flag|[...sums.values()].reduce((sum,value)=>sum^value,0n)
+    const next:State={...state,checksum,pageChecksums:sums,pageSize:db.pageSize,commit:db.pages.length,walOffset:wal?.nextOffset??Wal.HeaderSize,walSalt1:wal?.header.salt1??0,walSalt2:wal?.header.salt2??0}
+    if(checksum!==state.checksum||db.pageSize!==state.pageSize||db.pages.length!==state.commit) {
+      next.txId=state.txId+1n
+      const header:Ltx.Header={flags:Ltx.NoChecksum,pageSize:db.pageSize,commit:db.pages.length,minTxId:next.txId,maxTxId:next.txId,timestamp:BigInt(now().getTime()),preApplyChecksum:0n,walOffset:0n,walSize:0n,walSalt1:0,walSalt2:0,nodeId:0n}
+      await options.store.put(ltxKey(base,next.txId,next.txId),Ltx.encode(header,pages,0n))
+    }
+    await save(next)
+    needsReconcile=false
   }
 
   const syncWal = async (): Promise<void> => {
@@ -95,7 +116,7 @@ export const make = (options:Options): Replica => {
 
   const sync = async (): Promise<Position> => {
     if(active)return active
-    active=(async()=>{ await load(); if(state.txId===0n)await snapshot(); ensureGuard();await syncWal(); return Object.freeze({txId:state.txId,checksum:state.checksum}) })()
+    active=(async()=>{ await load(); if(state.txId===0n)await snapshot(); else if(needsReconcile)await reconcile(); ensureGuard();await syncWal(); return Object.freeze({txId:state.txId,checksum:state.checksum}) })()
     try{return await active}finally{active=undefined}
   }
 
