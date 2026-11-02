@@ -1,0 +1,19 @@
+{
+  "name": "ltx-js",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "bun test",
+    "test:integration": "LTX_JS_INTEGRATION=1 bun test test/integration",
+    "check": "bun run typecheck && bun test && bun build src/index.ts --outdir /tmp/ltx-js-build --target bun",
+    "bench": "bun run benchmarks/Replication.bench.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.4",
+    "typescript": "^7.0.2"
+  }
+}

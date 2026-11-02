@@ -1,0 +1,22 @@
+services:
+  versitygw:
+    image: ghcr.io/versity/versitygw:v1.3.1
+    ports:
+      - "7070:7070"
+    environment:
+      ROOT_ACCESS_KEY: ltx-js
+      ROOT_SECRET_KEY: ltx-js-development-secret
+      VGW_PORT: ":7070"
+      VGW_IAM_DIR: /data/iam
+      VGW_VERSIONING_DIR: /data/versioning
+      VGW_BACKEND: posix
+      VGW_BACKEND_ARGS: /data/s3
+    volumes:
+      - ./data/s3:/data/s3
+      - ./data/versioning:/data/versioning
+      - ./data/iam:/data/iam
+    healthcheck:
+      test: ["CMD", "pgrep", "versitygw"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
