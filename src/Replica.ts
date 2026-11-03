@@ -3,12 +3,12 @@ import { rename, rm } from "node:fs/promises"
 import { existsSync, readFileSync } from "node:fs"
 import * as Checksum from "./Checksum.ts"
 import * as Ltx from "./Ltx.ts"
+import * as ObjectStore from "./ObjectStore.ts"
 import * as Wal from "./Wal.ts"
-import type { ObjectInfo, ObjectStore } from "./ObjectStore.ts"
 
 export interface Options {
   readonly databasePath: string
-  readonly store: ObjectStore
+  readonly store: ObjectStore.ObjectStore
   readonly interval?: number
   readonly keyPrefix?: string
   readonly now?: () => Date
@@ -33,7 +33,7 @@ const join = (...parts: ReadonlyArray<string>) => parts.map(normalize).filter(Bo
 const ltxKey = (base:string,min:bigint,max:bigint) => join(base,"ltx","0000",Ltx.formatFilename(min,max))
 const stateKey = (base:string) => join(base,"state.json")
 
-const restorePlan = (infos: ReadonlyArray<ObjectInfo>, prefix: string) => {
+const restorePlan = (infos: ReadonlyArray<ObjectStore.ObjectInfo>, prefix: string) => {
   const files = infos.map((info) => {
     const match = /^(.*\/)?([0-9]{4})\/([^/]+\.ltx)$/.exec(info.key.slice(prefix.length))
     if (!match || Number(match[2]) > 9) throw new Error(`invalid LTX object key: ${info.key}`)

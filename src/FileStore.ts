@@ -1,18 +1,18 @@
 import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises"
 import { dirname, relative, resolve, sep } from "node:path"
-import type { ObjectInfo, ObjectStore } from "./ObjectStore.ts"
+import * as ObjectStore from "./ObjectStore.ts"
 
 const missing = (error: unknown): boolean => (error as NodeJS.ErrnoException).code === "ENOENT"
 
 /** Local object storage; writes become visible through an atomic rename. */
-export const make = (directory: string): ObjectStore => {
+export const make = (directory: string): ObjectStore.ObjectStore => {
   const root = resolve(directory)
   const path = (key: string): string => {
     const output = resolve(root, key), name = relative(root, output)
     if (!name || name === ".." || name.startsWith(`..${sep}`) || key.includes("\\")) throw new Error("invalid object key")
     return output
   }
-  return Object.freeze<ObjectStore>({
+  return Object.freeze<ObjectStore.ObjectStore>({
     put: async (key, value) => {
       const output = path(key), temporary = `${output}.${crypto.randomUUID()}.tmp`
       await mkdir(dirname(output), { recursive: true })
@@ -25,7 +25,7 @@ export const make = (directory: string): ObjectStore => {
     },
     remove: async key => { await rm(path(key), { force: true }) },
     list: async prefix => {
-      const output: ObjectInfo[] = []
+      const output: ObjectStore.ObjectInfo[] = []
       const walk = async (directory: string): Promise<void> => {
         let entries
         try { entries = await readdir(directory, { withFileTypes: true }) }

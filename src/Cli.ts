@@ -3,9 +3,9 @@ import { lstat, link, mkdir, rm } from "node:fs/promises"
 import { dirname, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import * as FileStore from "./FileStore.ts"
+import * as ObjectStore from "./ObjectStore.ts"
 import * as Replica from "./Replica.ts"
 import * as S3 from "./S3.ts"
-import type { ObjectStore } from "./ObjectStore.ts"
 import { version } from "../package.json"
 
 const help = `Usage:
@@ -57,8 +57,8 @@ const parse = (args: readonly string[]): Arguments => {
 }
 
 /** The CLI URL points directly at Litestream's replica directory (0000/, etc.). */
-export const replicaStore = (destination: string, env: NodeJS.ProcessEnv = process.env): ObjectStore => {
-  let store: ObjectStore
+export const replicaStore = (destination: string, env: NodeJS.ProcessEnv = process.env): ObjectStore.ObjectStore => {
+  let store: ObjectStore.ObjectStore
   if (!/^[a-z][a-z0-9+.-]*:/i.test(destination)) store = FileStore.make(destination)
   else {
     const url = new URL(destination)
@@ -81,7 +81,7 @@ export const replicaStore = (destination: string, env: NodeJS.ProcessEnv = proce
     } else throw new Error(`unsupported replica scheme: ${url.protocol} (use s3:// or file://)`)
   }
   const key = (value: string) => value.startsWith("ltx/") ? value.slice(4) : value
-  return Object.freeze<ObjectStore>({
+  return Object.freeze<ObjectStore.ObjectStore>({
     put: (name, value) => store.put(key(name), value),
     get: name => store.get(key(name)),
     remove: name => store.remove(key(name)),

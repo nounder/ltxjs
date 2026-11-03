@@ -1,4 +1,4 @@
-import { setU32 } from "./Binary.ts"
+import * as Binary from "./Binary.ts"
 
 export const Flag = 1n << 63n
 const Mask = (1n << 64n) - 1n
@@ -19,7 +19,7 @@ export const crc64 = (value: Uint8Array, initial = 0n): bigint => {
 
 export const page = (pageNumber: number, data: Uint8Array): bigint => {
   const value = new Uint8Array(data.length + 4)
-  setU32(value, 0, pageNumber)
+  Binary.setU32(value, 0, pageNumber)
   value.set(data, 4)
   return Flag | crc64(value)
 }

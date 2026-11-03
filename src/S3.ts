@@ -1,4 +1,4 @@
-import type { ObjectInfo, ObjectStore } from "./ObjectStore.ts"
+import * as ObjectStore from "./ObjectStore.ts"
 
 export type Fetch = (...args: Parameters<typeof globalThis.fetch>) => ReturnType<typeof globalThis.fetch>
 
@@ -52,7 +52,7 @@ const keyUrl = (options: Options, key?: string, includePrefix=true): URL => {
   return endpoint
 }
 
-export const make = (options: Options): ObjectStore => {
+export const make = (options: Options): ObjectStore.ObjectStore => {
   const request = async (method: string, url: URL, body=new Uint8Array()): Promise<Response> => {
     const attempts=options.maxAttempts??5
     for(let attempt=1;;attempt++){
@@ -64,12 +64,12 @@ export const make = (options: Options): ObjectStore => {
       await new Promise(resolve=>setTimeout(resolve,(options.retryDelay??100)*2**(attempt-1)))
     }
   }
-  return Object.freeze<ObjectStore>({
+  return Object.freeze<ObjectStore.ObjectStore>({
     put: async (key,value) => { await request("PUT",keyUrl(options,key),new Uint8Array(value)) },
     get: async key => { const response=await request("GET",keyUrl(options,key)); return response.status===404 ? undefined : new Uint8Array(await response.arrayBuffer()) },
     remove: async key => { await request("DELETE",keyUrl(options,key)) },
     list: async prefix => {
-      const output: ObjectInfo[]=[]; let continuation: string | undefined
+      const output: ObjectStore.ObjectInfo[]=[]; let continuation: string | undefined
       do {
         const url=keyUrl(options,undefined,false); url.searchParams.set("list-type","2"); url.searchParams.set("prefix",[normalizePrefix(options.prefix),prefix.replace(/^\/+/,"")].filter((part,index)=>index===1||part.length>0).join("/"))
         if (continuation) url.searchParams.set("continuation-token",continuation)
