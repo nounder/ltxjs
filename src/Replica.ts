@@ -4,7 +4,7 @@ import { existsSync, readFileSync } from "node:fs"
 import * as Checksum from "./Checksum.ts"
 import * as Ltx from "./Ltx.ts"
 import * as Wal from "./Wal.ts"
-import type { ObjectStore } from "./ObjectStore.ts"
+import type { ObjectInfo, ObjectStore } from "./ObjectStore.ts"
 
 export interface Options {
   readonly databasePath: string
@@ -32,6 +32,50 @@ const normalize = (value="") => value.replace(/^\/+|\/+$/g,"")
 const join = (...parts: ReadonlyArray<string>) => parts.map(normalize).filter(Boolean).join("/")
 const ltxKey = (base:string,min:bigint,max:bigint) => join(base,"ltx","0000",Ltx.formatFilename(min,max))
 const stateKey = (base:string) => join(base,"state.json")
+
+const restorePlan = (infos: ReadonlyArray<ObjectInfo>, prefix: string) => {
+  const files = infos.map((info) => {
+    const match = /^(.*\/)?([0-9]{4})\/([^/]+\.ltx)$/.exec(info.key.slice(prefix.length))
+    if (!match || Number(match[2]) > 9) throw new Error(`invalid LTX object key: ${info.key}`)
+    const range = Ltx.parseFilename(match[3]!)
+    if (range[0] === 0n || range[0] > range[1]) {
+      throw new Error(`invalid LTX transaction range: ${info.key}`)
+    }
+    return {
+      key: info.key,
+      root: match[1] ?? "",
+      level: Number(match[2]),
+      minTxId: range[0],
+      maxTxId: range[1],
+    }
+  })
+  if (new Set(files.map((file) => file.root)).size > 1) {
+    throw new Error("multiple LTX replicas found; specify a database prefix in the replica URL")
+  }
+  files.sort((a, b) => {
+    if (a.minTxId !== b.minTxId) return a.minTxId < b.minTxId ? -1 : 1
+    if (a.maxTxId !== b.maxTxId) return a.maxTxId > b.maxTxId ? -1 : 1
+    return b.level - a.level
+  })
+  const plan: typeof files = []
+  let txId = 0n, index = 0
+  while (index < files.length) {
+    let next: (typeof files)[number] | undefined
+    while (index < files.length && files[index]!.minTxId <= txId + 1n) {
+      const file = files[index++]!
+      if (file.maxTxId > txId && (!next || file.maxTxId > next.maxTxId)) next = file
+    }
+    if (!next) {
+      if (index === files.length) break
+      throw new Error(
+        `non-contiguous LTX files: have up to ${Ltx.formatTxId(txId)} but next file starts at ${Ltx.formatTxId(files[index]!.minTxId)}`,
+      )
+    }
+    plan.push(next)
+    txId = next.maxTxId
+  }
+  return plan
+}
 
 const readDatabase = (bytes:Uint8Array): {pageSize:number; pages:ReadonlyArray<Ltx.Page>} => {
   if (bytes.length < 100 || new TextDecoder().decode(bytes.subarray(0,16)) !== "SQLite format 3\0") throw new Error("invalid SQLite database")
@@ -120,23 +164,46 @@ export const make = (options:Options): Replica => {
     try{return await active}finally{active=undefined}
   }
 
-  const restore = async (outputPath:string): Promise<Position> => {
-    const prefix=`${join(base,"ltx")}/`
-    const infos=(await options.store.list(prefix)).filter(info=>info.key.startsWith(prefix)&&info.key.endsWith(".ltx")).sort((a,b)=>a.key.localeCompare(b.key)); if(infos.length===0)throw new Error("no LTX files found")
-    const pages=new Map<number,Uint8Array>(); let position:Position={txId:0n,checksum:0n}, pageSize=0, commit=0
-    for(const info of infos) { const value=await options.store.get(info.key); if(!value)throw new Error(`missing LTX object: ${info.key}`); const file=Ltx.decode(value)
-      if(file.header.minTxId!==position.txId+1n||(!(file.header.flags&Ltx.NoChecksum)&&file.header.preApplyChecksum!==position.checksum))throw new Error(`non-contiguous LTX file: ${info.key}`)
-      for(const page of file.pages)pages.set(page.pageNumber,page.data); for(const page of [...pages.keys()])if(page>file.header.commit)pages.delete(page)
-      const actual=Checksum.database([...pages].map(([number,data])=>[number,data] as const)); if(!(file.header.flags&Ltx.NoChecksum)&&actual!==file.postApplyChecksum)throw new Error(`post-apply checksum mismatch: ${info.key}`)
-      position=Object.freeze({txId:file.header.maxTxId,checksum:actual}); pageSize=file.header.pageSize; commit=file.header.commit
+  const restore = async (outputPath: string): Promise<Position> => {
+    const prefix = `${join(base, "ltx")}/`
+    const infos = (await options.store.list(prefix)).filter(
+      (info) => info.key.startsWith(prefix) && info.key.endsWith(".ltx"),
+    )
+    if (infos.length === 0) throw new Error("no LTX files found")
+    const pages = new Map<number, Uint8Array>()
+    let position: Position = { txId: 0n, checksum: 0n }, pageSize = 0, commit = 0
+    for (const info of restorePlan(infos, prefix)) {
+      const value = await options.store.get(info.key)
+      if (!value) throw new Error(`missing LTX object: ${info.key}`)
+      const file = Ltx.decode(value)
+      if (file.header.minTxId !== info.minTxId || file.header.maxTxId !== info.maxTxId) {
+        throw new Error(`LTX filename/header transaction range mismatch: ${info.key}`)
+      }
+      // An overlapping compaction's pre-apply checksum belongs to its own start
+      // position. Its post-apply checksum still validates the resulting database.
+      if (file.header.minTxId > position.txId + 1n || file.header.maxTxId <= position.txId
+        || (!(file.header.flags & Ltx.NoChecksum) && file.header.minTxId === position.txId + 1n
+          && file.header.preApplyChecksum !== position.checksum)) {
+        throw new Error(`non-contiguous LTX file: ${info.key}`)
+      }
+      for (const page of file.pages) pages.set(page.pageNumber, page.data)
+      for (const page of pages.keys()) if (page > file.header.commit) pages.delete(page)
+      const actual = Checksum.database([...pages].map(([number, data]) => [number, data] as const))
+      if (!(file.header.flags & Ltx.NoChecksum) && actual !== file.postApplyChecksum) {
+        throw new Error(`post-apply checksum mismatch: ${info.key}`)
+      }
+      position = Object.freeze({ txId: file.header.maxTxId, checksum: actual })
+      pageSize = file.header.pageSize
+      commit = file.header.commit
     }
-    const output=new Uint8Array(pageSize*commit); for(const [page,data] of pages)output.set(data,(page-1)*pageSize)
+    const output = new Uint8Array(pageSize * commit)
+    for (const [page, data] of pages) output.set(data, (page - 1) * pageSize)
     // A standalone restored file must open without WAL/SHM sidecars, including
     // through a read-only SQLite connection.
-    if(output.length>=100){output[18]=1;output[19]=1}
-    const temporary=`${outputPath}.ltx-js-${crypto.randomUUID()}.tmp`
-    try { await Bun.write(temporary,output); await rename(temporary,outputPath) }
-    finally { await rm(temporary,{force:true}) }
+    if (output.length >= 100) { output[18] = 1; output[19] = 1 }
+    const temporary = `${outputPath}.ltx-js-${crypto.randomUUID()}.tmp`
+    try { await Bun.write(temporary, output); await rename(temporary, outputPath) }
+    finally { await rm(temporary, { force: true }) }
     return position
   }
 

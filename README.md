@@ -30,7 +30,7 @@ Destinations accept directory paths, `file://`, or `s3://` URLs. S3 requires `AW
 
 Replication polls every second and flushes on SIGINT/SIGTERM. Restore refuses existing files or SQLite sidecars; `-if-db-not-exists` skips existing outputs and `-if-replica-exists` skips empty replicas.
 
-Supports one database and destination, without YAML configuration, retention, or point-in-time restore. CLI replicas contain `0000/*.ltx` directly; the library adds an `ltx/` prefix. Restore requires contiguous LTX history without overlapping compaction levels.
+Supports one database and destination, without YAML configuration, retention, or point-in-time restore. CLI replicas contain `0000/*.ltx` directly; the library adds an `ltx/` prefix. Restore selects the newest full snapshot and replays a contiguous chain across compaction levels, skipping files already covered by that chain. A replica URL may point at a parent directory containing one database; specify the database prefix when multiple replicas exist.
 
 ## Usage
 
