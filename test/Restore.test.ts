@@ -219,16 +219,21 @@ test.describe("restore planning", () => {
             process.execPath,
             new URL("../src/Cli.ts", import.meta.url).pathname,
             "restore",
+            "-log-format=json",
             "-o",
             output,
             NPath.join(directory, prefix),
           ],
           { stdout: "pipe", stderr: "pipe" },
         )
-        const stderr = await new Response(child.stderr).text()
+        const [stdout, stderr] = await Promise.all([
+          new Response(child.stdout).text(),
+          new Response(child.stderr).text(),
+        ])
         test
           .expect({ code: await child.exited, stderr })
-          .toEqual({ code: 0, stderr: `restored ${output}\n` })
+          .toEqual({ code: 0, stderr: "" })
+        test.expect(JSON.parse(stdout)).toMatchObject({ level: "INFO", msg: "restore completed", path: output, txid: "00000000000058e8" })
         const restored = new Database(output, { readonly: true })
         try {
           test.expect(restored.query("PRAGMA integrity_check").values()).toEqual([["ok"]])

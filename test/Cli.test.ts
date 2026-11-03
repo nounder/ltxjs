@@ -31,6 +31,7 @@ const rows = (path: string) => {
   try { expect(db.query("PRAGMA integrity_check").values()).toEqual([["ok"]]); return db.query("SELECT value FROM items ORDER BY rowid").values() }
   finally { db.close() }
 }
+const records = (output: string) => output.trim().split("\n").filter(Boolean).map(line => JSON.parse(line))
 
 describe("CLI", () => {
   test("prints help and version; rejects unknown and unsupported options", async () => {
@@ -51,6 +52,34 @@ describe("CLI", () => {
     } finally { db.close() }
   })
 
+  test("writes Litestream JSON logs and filters CLI and library events", async () => {
+    const { source, destination, output, db } = await setup()
+    try {
+      const env = { ...process.env, LOG_LEVEL: "error" }
+      const replication = await run(["replicate", "-once", "--log-format=json", "-log-level", "DEBUG", source, destination], env)
+      expect(replication).toMatchObject({ code: 0, stderr: "" })
+      const logs = records(replication.stdout)
+      expect(logs.map(log => log.msg)).toEqual(["nodelite", "ltx file uploaded", "initialized db", "replica sync", "replicating to", "one-shot replication complete"])
+      expect(logs.every(log => !Number.isNaN(Date.parse(log.time)) && ["INFO", "DEBUG"].includes(log.level))).toBe(true)
+      expect(logs.find(log => log.msg === "ltx file uploaded")).toMatchObject({ db: source, level: "DEBUG", ltx_level: 0, minTXID: "0000000000000001", maxTXID: "0000000000000001" })
+      expect((await run(["replicate", "-once", source, destination], env))).toMatchObject({ code: 0, stdout: "", stderr: "" })
+      const restoration = await run(["restore", "-log-format", "json", "--log-stderr", "-o", output, destination])
+      expect(restoration).toMatchObject({ code: 0, stdout: "" })
+      expect(records(restoration.stderr)).toEqual([expect.objectContaining({ level: "INFO", msg: "restore completed", path: output, txid: "0000000000000001" })])
+    } finally { db.close() }
+  })
+
+  test("rejects invalid logging options and writes structured command failures", async () => {
+    for (const args of [["replicate", "-log-level", "verbose"], ["restore", "-log-format=xml"], ["replicate", "-log-level"], ["restore", "-log-format"], ["replicate", "-log-stderr=maybe"]]) {
+      const result = await run(args)
+      expect(result.code).toBe(1)
+      expect(result.stderr).toContain("level=ERROR")
+    }
+    const result = await run(["replicate", "-log-format=json", "-log-stderr", "/missing.sqlite", "./backup"])
+    expect(result).toMatchObject({ code: 1, stdout: "" })
+    expect(records(result.stderr)).toEqual([expect.objectContaining({ level: "ERROR", msg: "command failed", error: "database does not exist: /missing.sqlite" })])
+  })
+
   test("resumes one-shot replication after a writer closes and checkpoints the WAL", async () => {
     const { source, destination, output, db } = await setup()
     db.close()
@@ -69,11 +98,30 @@ describe("CLI", () => {
       const child = Bun.spawn([process.execPath, cli, "replicate", source, destination], { stdout: "pipe", stderr: "pipe" })
       const timeout = setTimeout(() => child.kill("SIGKILL"), 5000)
       try {
-        const reader = child.stderr.getReader(), first = await reader.read(); reader.releaseLock()
-        expect(new TextDecoder().decode(first.value)).toContain("replicating")
+        const reader = child.stdout.getReader(), decoder = new TextDecoder()
+        let logs = ""
+        try {
+          while (!logs.includes('msg="replicating to"')) {
+            const chunk = await reader.read()
+            if (chunk.done) break
+            logs += decoder.decode(chunk.value, { stream: true })
+          }
+        } finally { reader.releaseLock() }
+        expect(logs).toContain('msg="replicating to"')
         db.run("INSERT INTO items VALUES ('at shutdown')")
         child.kill(signal)
         expect(await child.exited).toBe(0)
+        const shutdownReader = child.stdout.getReader()
+        let shutdown = ""
+        try {
+          while (true) {
+            const chunk = await shutdownReader.read()
+            if (chunk.done) break
+            shutdown += decoder.decode(chunk.value, { stream: true })
+          }
+        } finally { shutdownReader.releaseLock() }
+        expect(shutdown).toContain(`signal=${signal}`)
+        expect(shutdown).toContain('msg="nodelite shut down"')
         expect((await run(["restore", "-o", output, destination])).code).toBe(0)
         expect(rows(output)).toEqual([["one"], ["at shutdown"]])
       } finally { clearTimeout(timeout); child.kill(); await child.exited; db.close() }
@@ -124,7 +172,8 @@ describe("CLI", () => {
       expect(rows(output)).toEqual([["one"]])
       const failed = await run(["restore", "-if-replica-exists", "-o", `${output}-failed`, "s3://bucket/db"], { ...env, AWS_ACCESS_KEY_ID: "bad" })
       expect(failed.code).toBe(1)
-      expect(failed.stderr).toContain("403")
+      expect(failed.stdout).toContain("403")
+      expect(failed.stdout).not.toContain("test-secret")
     } finally { server.stop(true); db.close() }
   })
 })

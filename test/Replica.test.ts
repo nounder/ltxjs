@@ -32,6 +32,26 @@ describe("Replica",()=>{
 
   test("polls for changes until stopped",async()=>{const {path,db}=await setup(),store=ObjectStore.memory(),replica=Replica.make({databasePath:path,store,interval:5});replica.start();const deadline=Date.now()+1000;while(replica.position().txId===0n&&Date.now()<deadline)await Bun.sleep(5);db.run("INSERT INTO items(value) VALUES ('watched')");while(replica.position().txId===1n&&Date.now()<deadline)await Bun.sleep(5);await replica.stop();expect(replica.position().txId).toBeGreaterThan(1n);db.close()})
 
+  test("logs background sync failures while preserving the error callback", async () => {
+    const { path, db } = await setup(), failure = new Error("storage unavailable")
+    const logs: Array<{ level: string; message: string; fields: unknown }> = []
+    let onError!: (error: unknown) => void
+    const failed = new Promise<unknown>(resolve => { onError = resolve })
+    const replica = Replica.make({
+      databasePath: path,
+      store: { ...ObjectStore.memory(), get: async () => { throw failure } },
+      interval: 5,
+      logger: (level, message, fields) => { logs.push({ level, message, fields }) },
+      onError
+    })
+    try {
+      replica.start()
+      expect(await failed).toBe(failure)
+      await replica.stop()
+      expect(logs).toEqual([{ level: "error", message: "sync error", fields: { db: path, error: failure } }])
+    } finally { await replica.stop(); db.close() }
+  })
+
   test("rejects restore when an LTX object is corrupted",async()=>{const {directory,path,db}=await setup(),store=ObjectStore.memory(),replica=Replica.make({databasePath:path,store});await replica.sync();const entry=[...store.entries()].find(([key])=>key.endsWith(".ltx"))!;const corrupt=entry[1].slice();corrupt[120]=corrupt[120]!^1;await store.put(entry[0],corrupt);expect(replica.restore(join(directory,"bad.sqlite"))).rejects.toThrow();db.close()})
 
   for (const failedKey of [".ltx", "state.json"]) {

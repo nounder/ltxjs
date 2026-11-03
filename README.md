@@ -58,6 +58,30 @@ await replica.restore("restored.sqlite")
 
 `sync()` is also available for explicit, serialized replication. Snapshot creation uses SQLite serialization under a writer lock, with a read guard preserving subsequent WAL frames. Only committed, checksum-valid WAL transactions are uploaded.
 
+## Logging
+
+The CLI follows [Litestream's logging format](https://litestream.io/reference/config/#logging): `text` (slog-style key/value pairs) or newline-delimited `json`, with `time`, `level`, and `msg` fields. It defaults to `info` on stdout. Replication startup, restore completion, conditional restore skips, shutdown, and failures are logged; `debug` adds LTX uploads, transaction positions, and restore progress. Idle polls do not emit logs.
+
+```sh
+bun run cli replicate -log-level debug -log-format json -log-stderr app.sqlite ./backup
+bun run cli restore -log-format json -o restored.sqlite ./backup
+LOG_LEVEL=warn bun run cli replicate app.sqlite ./backup
+```
+
+Both commands accept `-log-level`, `-log-format`, and `-log-stderr` with one or two dashes. Levels are `trace`, `debug`, `info`, `warn`, and `error` (case-insensitive; `warning` is an alias). `-log-level` overrides `LOG_LEVEL`. Numeric LTX compaction levels use `ltx_level` so the severity field remains unambiguous.
+
+The library stays silent unless given a logger. Use the included formatter or provide a `(level, message, fields) => void` callback; background failures still invoke `onError`.
+
+```ts
+import { Logger, Replica } from "nodelite"
+
+const replica = Replica.make({
+  databasePath: "app.sqlite",
+  store,
+  logger: Logger.make({ level: "debug", type: "json", stderr: true })
+})
+```
+
 ## Local S3 integration
 
 

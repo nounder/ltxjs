@@ -3,6 +3,7 @@ import { rename, rm } from "node:fs/promises"
 import { existsSync, readFileSync } from "node:fs"
 import * as Checksum from "./Checksum.ts"
 import * as Ltx from "./Ltx.ts"
+import * as Logger from "./Logger.ts"
 import * as ObjectStore from "./ObjectStore.ts"
 import * as Wal from "./Wal.ts"
 
@@ -13,6 +14,8 @@ export interface Options {
   readonly keyPrefix?: string
   readonly now?: () => Date
   readonly onError?: (error: unknown) => void
+  /** Optional structured logging; the library is silent when omitted. */
+  readonly logger?: Logger.Logger
 }
 export interface Position { readonly txId: bigint; readonly checksum: bigint }
 export interface Replica {
@@ -92,6 +95,13 @@ const parseState = (value:Uint8Array): State => {
 
 export const make = (options:Options): Replica => {
   const base=normalize(options.keyPrefix), now=options.now ?? (()=>new Date())
+  const log: Logger.Logger = (level, message, fields) => options.logger?.(level, message, { db: options.databasePath, ...fields })
+  const upload = async (header: Ltx.Header, pages: ReadonlyArray<Ltx.Page>) => {
+    const value = Ltx.encode(header, pages, 0n)
+    await options.store.put(ltxKey(base, header.minTxId, header.maxTxId), value)
+    log("debug", "ltx file uploaded", { ltx_level: 0, minTXID: Ltx.formatTxId(header.minTxId), maxTXID: Ltx.formatTxId(header.maxTxId), size: value.length })
+  }
+  let initialized = false
   let state=initialState(), loaded=false, needsReconcile=false, timer:ReturnType<typeof setTimeout>|undefined, active:Promise<Position>|undefined, guard:Database|undefined, stopped=true
   const save = async (next:State) => { await options.store.put(stateKey(base),serializeState(next)); state=next }
   const load = async () => { if(loaded)return; const value=await options.store.get(stateKey(base)); if(value) {state=parseState(value);needsReconcile=true} loaded=true }
@@ -122,7 +132,7 @@ export const make = (options:Options): Replica => {
     const {db,wal}=capture()
     const snapshotPages=db.pages.filter(page=>page.pageNumber!==Ltx.lockPageNumber(db.pageSize)),pages=snapshotPages.map(page=>[page.pageNumber,page.data] as const), checksum=Checksum.database(pages)
     const header:Ltx.Header={flags:Ltx.NoChecksum,pageSize:db.pageSize,commit:db.pages.length,minTxId:1n,maxTxId:1n,timestamp:BigInt(now().getTime()),preApplyChecksum:0n,walOffset:0n,walSize:0n,walSalt1:0,walSalt2:0,nodeId:0n}
-    await options.store.put(ltxKey(base,1n,1n),Ltx.encode(header,snapshotPages,0n))
+    await upload(header,snapshotPages)
     await save({txId:1n,checksum,walOffset:wal?.nextOffset??Wal.HeaderSize,walSalt1:wal?.header.salt1??0,walSalt2:wal?.header.salt2??0,pageSize:db.pageSize,commit:db.pages.length,pageChecksums:new Map(pages.map(([page,data])=>[page,Checksum.page(page,data)]))})
   }
 
@@ -136,7 +146,7 @@ export const make = (options:Options): Replica => {
     if(checksum!==state.checksum||db.pageSize!==state.pageSize||db.pages.length!==state.commit) {
       next.txId=state.txId+1n
       const header:Ltx.Header={flags:Ltx.NoChecksum,pageSize:db.pageSize,commit:db.pages.length,minTxId:next.txId,maxTxId:next.txId,timestamp:BigInt(now().getTime()),preApplyChecksum:0n,walOffset:0n,walSize:0n,walSalt1:0,walSalt2:0,nodeId:0n}
-      await options.store.put(ltxKey(base,next.txId,next.txId),Ltx.encode(header,pages,0n))
+      await upload(header,pages)
     }
     await save(next)
     needsReconcile=false
@@ -153,14 +163,22 @@ export const make = (options:Options): Replica => {
       for(const page of [...next.pageChecksums.keys()]) if(page>transaction.commit) { next.checksum=Checksum.Flag|(next.checksum^next.pageChecksums.get(page)!); next.pageChecksums.delete(page) }
       next.txId=min; next.commit=transaction.commit; next.pageSize=parsed.header.pageSize
       const header:Ltx.Header={flags:Ltx.NoChecksum,pageSize:next.pageSize,commit:transaction.commit,minTxId:min,maxTxId:min,timestamp:BigInt(now().getTime()),preApplyChecksum:0n,walOffset:BigInt(transaction.startOffset),walSize:BigInt(transaction.endOffset-transaction.startOffset),walSalt1:parsed.header.salt1,walSalt2:parsed.header.salt2,nodeId:0n}
-      await options.store.put(ltxKey(base,min,min),Ltx.encode(header,pages,0n))
+      await upload(header,pages)
       next.walOffset=transaction.endOffset; next.walSalt1=parsed.header.salt1; next.walSalt2=parsed.header.salt2; await save(next)
     }
   }
 
   const sync = async (): Promise<Position> => {
     if(active)return active
-    active=(async()=>{ await load(); if(state.txId===0n)await snapshot(); else if(needsReconcile)await reconcile(); ensureGuard();await syncWal(); return Object.freeze({txId:state.txId,checksum:state.checksum}) })()
+    active=(async()=>{
+      await load()
+      const previousTxId = state.txId
+      if(state.txId===0n)await snapshot(); else if(needsReconcile)await reconcile()
+      ensureGuard();await syncWal()
+      if (!initialized) { initialized = true; log("info", "initialized db", { path: options.databasePath }) }
+      if (state.txId !== previousTxId) log("debug", "replica sync", { txid: Ltx.formatTxId(state.txId), checksum: Checksum.format(state.checksum) })
+      return Object.freeze({txId:state.txId,checksum:state.checksum})
+    })()
     try{return await active}finally{active=undefined}
   }
 
@@ -172,7 +190,10 @@ export const make = (options:Options): Replica => {
     if (infos.length === 0) throw new Error("no LTX files found")
     const pages = new Map<number, Uint8Array>()
     let position: Position = { txId: 0n, checksum: 0n }, pageSize = 0, commit = 0
-    for (const info of restorePlan(infos, prefix)) {
+    const plan = restorePlan(infos, prefix)
+    log("debug", "restore plan", { n: plan.length, txid: Ltx.formatTxId(plan[plan.length - 1]!.maxTxId) })
+    for (const info of plan) {
+      log("debug", "opening ltx file for restore", { ltx_level: info.level, min: Ltx.formatTxId(info.minTxId), max: Ltx.formatTxId(info.maxTxId) })
       const value = await options.store.get(info.key)
       if (!value) throw new Error(`missing LTX object: ${info.key}`)
       const file = Ltx.decode(value)
@@ -204,9 +225,10 @@ export const make = (options:Options): Replica => {
     const temporary = `${outputPath}.ltx-js-${crypto.randomUUID()}.tmp`
     try { await Bun.write(temporary, output); await rename(temporary, outputPath) }
     finally { await rm(temporary, { force: true }) }
+    log("debug", "restore completed", { path: outputPath, txid: Ltx.formatTxId(position.txId), size: output.length })
     return position
   }
 
-  const schedule = () => { if(stopped)return; timer=setTimeout(async()=>{ try{await sync()}catch(error){options.onError?.(error)}finally{schedule()} },options.interval??1000) }
+  const schedule = () => { if(stopped)return; timer=setTimeout(async()=>{ try{await sync()}catch(error){log("error", "sync error", { error: error instanceof Error ? error : String(error) });options.onError?.(error)}finally{schedule()} },options.interval??1000) }
   return Object.freeze({sync,restore,start:()=>{if(!stopped)return;stopped=false;schedule()},stop:async()=>{stopped=true;if(timer)clearTimeout(timer);try{if(active)await active}finally{closeGuard()}},position:()=>Object.freeze({txId:state.txId,checksum:state.checksum})})
 }
