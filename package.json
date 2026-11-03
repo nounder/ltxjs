@@ -1,8 +1,8 @@
 {
-  "name": "ltx-js",
+  "name": "nodelite",
   "version": "0.1.0",
   "bin": {
-    "ltxjs": "./src/Cli.ts"
+    "nodelite": "./src/Cli.ts"
   },
   "type": "module",
   "exports": {
@@ -11,12 +11,10 @@
   "scripts": {
     "test": "bun test",
     "test:integration": "TEST_INTEGRATIONS=1 bun test test/integration",
-    "check": "bun run typecheck && bun test && bun build src/index.ts src/Cli.ts --outdir /tmp/ltx-js-build --target bun",
     "bench": "bun run benchmarks/Replication.bench.ts",
     "typecheck": "bun check --no-script",
     "cli": "bun run src/Cli.ts",
-    "fmt": "bun fmt",
-    "fmt:check": "bun fmt --check"
+    "fmt": "bun fmt"
   },
   "devDependencies": {
     "@types/bun": "^1.4.4"
